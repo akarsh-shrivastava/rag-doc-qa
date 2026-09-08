@@ -12,11 +12,29 @@ from langchain_community.vectorstores import FAISS
 
 load_dotenv()
 
+def load_pdf(file_path: str) -> str:
+    reader = PdfReader(file_path)
+    pages = []
+
+    for page_num, page in enumerate(reader.pages):
+        text = page.extract_text()
+        if text:
+            pages.append(text)
+        else:
+            print(f"Page {page_num + 1}: No text found")
+    return "\n".join(pages)
+
 def chunk_text(text: str) -> list:
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
         chunk_overlap=200,
-        separators=["\n\n", "\n", ".", " "]
+        separators=[
+            "\nLAW ",      # split on new laws first
+            "\n\n",        # then paragraphs
+            "\n",          # then lines
+            ".",           # then sentences
+            " "            # last resort
+        ]
     )
     chunks = splitter.create_documents([text])
     return chunks
@@ -39,29 +57,48 @@ def build_vector_store(chunks: list) -> FAISS:
     
     return vector_store
 
-def load_pdf(file_path: str) -> str:
-    reader = PdfReader(file_path)
-    pages = []
+def save_vector_store(vector_store: FAISS, path: str = "./faiss_index"):
+    vector_store.save_local(path)
+    print(f"Vector store saved to {path}")
 
-    for page_num, page in enumerate(reader.pages):
-        text = page.extract_text()
-        if text:
-            pages.append(text)
-        else:
-            print(f"Page {page_num + 1}: No text found")
-    return "\n".join(pages)
+def load_vector_store(path: str = "./faiss_index") -> FAISS:
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
+    vector_store = FAISS.load_local(path, embeddings, allow_dangerous_deserialization=True)
+    print(f"Vector store loaded from {path}")
+    return vector_store
+
+
+def retrieve_chunks(query: str, vector_store: FAISS, k: int = 3):
+    docs_with_scores = vector_store.similarity_search_with_score(query, k)
+    context_parts = []
+    for i, dws in enumerate(docs_with_scores):
+        context_parts.append(f"[Chunk {i+1}]    Relevance Score: {dws[1]:.4f}\n{dws[0].page_content}")
+    
+    context = "\n"
+    context += "\n----------------------------------------------\n".join(context_parts)
+    return context, dws
+
 
 if __name__ == "__main__":
-    sample_pdf = "docs/Laws-of-Cricket-2017-Code-3rd-Edition-2022.pdf"
-    text = load_pdf(sample_pdf)
+    REFERENCE_PDF = "docs/Laws-of-Cricket-2017-Code-3rd-Edition-2022.pdf"
+    IS_NEW_PDF = False
 
-    print("Chunking text...")
-    chunks = chunk_text(text)
-    print(f"Created {len(chunks)} chunks")
+    if IS_NEW_PDF or not os.path.exists("./faiss_index"):
+        print("Building vector store...")
+        text = load_pdf(REFERENCE_PDF)
 
-    print("Generating embeddings + building FAISS index...")
-    vector_store = build_vector_store(chunks)
-    print("Vector store built successfully")
+        print("Chunking text...")
+        chunks = chunk_text(text)
+        print(f"Created {len(chunks)} chunks")
+
+        print("Generating embeddings + building FAISS index...")
+        vector_store = build_vector_store(chunks)
+        print("Vector store built successfully")
+
+        save_vector_store(vector_store)
+    else:
+        print("Loading existing vector store...")
+        vector_store = load_vector_store()
 
     test_queries = [
         "how many balls in an over",
@@ -69,5 +106,6 @@ if __name__ == "__main__":
         "when is a batsman given out obstructing the field"
     ]
     for query in test_queries:
-        results = vector_store.similarity_search(query, k=3)
-        print(f"\nQuery: {query}\n Top result for test query:\n{results[0].page_content}")
+        print("\n", "-"*50, sep="")
+        context, dws = retrieve_chunks(query, vector_store)
+        print(f"\nQuery: {query}\n len(docs) = {len(dws)}\n context:\n{context}")
