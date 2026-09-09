@@ -3,7 +3,10 @@ import time
 
 from pypdf import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_core.documents import Document
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.prompts import PromptTemplate
 from dotenv import load_dotenv
 
 import warnings
@@ -11,6 +14,23 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 from langchain_community.vectorstores import FAISS
 
 load_dotenv()
+
+
+PROMPT_TEMPLATE = """
+You are an expert assistant answering questions about cricket laws.
+Use ONLY the context provided below to answer the question.
+If the answer is not in the context, say "I cannot find this in the provided document."
+Do not make up or infer information not present in the context.
+
+Context:
+{context}
+
+Question:
+{question}
+
+Answer:
+"""
+
 
 def load_pdf(file_path: str) -> str:
     reader = PdfReader(file_path)
@@ -29,11 +49,11 @@ def chunk_text(text: str) -> list:
         chunk_size=1000,
         chunk_overlap=200,
         separators=[
-            "\nLAW ",      # split on new laws first
-            "\n\n",        # then paragraphs
-            "\n",          # then lines
-            ".",           # then sentences
-            " "            # last resort
+            "\nLAW ",
+            "\n\n",
+            "\n",
+            ".",
+            " "
         ]
     )
     chunks = splitter.create_documents([text])
@@ -57,7 +77,7 @@ def build_vector_store(chunks: list) -> FAISS:
     
     return vector_store
 
-def save_vector_store(vector_store: FAISS, path: str = "./faiss_index"):
+def save_vector_store(vector_store: FAISS, path: str = "./faiss_index") -> None:
     vector_store.save_local(path)
     print(f"Vector store saved to {path}")
 
@@ -68,7 +88,7 @@ def load_vector_store(path: str = "./faiss_index") -> FAISS:
     return vector_store
 
 
-def retrieve_chunks(query: str, vector_store: FAISS, k: int = 3):
+def retrieve_chunks(query: str, vector_store: FAISS, k: int = 3) -> tuple[str,  list[tuple[Document, float]]]:
     docs_with_scores = vector_store.similarity_search_with_score(query, k)
     context_parts = []
     for i, dws in enumerate(docs_with_scores):
@@ -76,8 +96,26 @@ def retrieve_chunks(query: str, vector_store: FAISS, k: int = 3):
     
     context = "\n"
     context += "\n----------------------------------------------\n".join(context_parts)
-    return context, dws
+    return context, docs_with_scores
 
+
+def generate_answer(query: str, context: str) -> str:
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.2)
+    prompt = PromptTemplate(template=PROMPT_TEMPLATE, input_variables=["context", "question"])
+    formatted_prompt = prompt.format(context=context, question=query)
+    
+    response = llm.invoke(formatted_prompt)
+    return response.content
+
+def rag_pipeline(query: str, vector_store:FAISS) -> dict:
+    context, docs_with_scores = retrieve_chunks(query, vector_store)
+    answer = generate_answer(query, context)
+
+    return {
+        "question": query,
+        "answer": answer,
+        "source_docs": docs_with_scores
+    }
 
 if __name__ == "__main__":
     REFERENCE_PDF = "docs/Laws-of-Cricket-2017-Code-3rd-Edition-2022.pdf"
@@ -101,11 +139,14 @@ if __name__ == "__main__":
         vector_store = load_vector_store()
 
     test_queries = [
-        "how many balls in an over",
-        "what happens if the ball hits the helmet",
-        "when is a batsman given out obstructing the field"
+        # "how many balls in an over",
+        # "what happens if the ball hits the helmet",
+        # "when is a batsman given out obstructing the field",
+        # "how many runs has Sachin Tendulkar scored in ODIs",
+        "what happens if a player cheats"
     ]
     for query in test_queries:
         print("\n", "-"*50, sep="")
-        context, dws = retrieve_chunks(query, vector_store)
-        print(f"\nQuery: {query}\n len(docs) = {len(dws)}\n context:\n{context}")
+        result = rag_pipeline(query, vector_store)
+        print(f"Q: {result['question']}")
+        print(f"A: {result['answer']}")
