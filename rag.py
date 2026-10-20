@@ -1,4 +1,5 @@
 import os
+import io
 import time
 
 from pypdf import PdfReader
@@ -44,6 +45,22 @@ def load_pdf(file_path: str) -> str:
             print(f"Page {page_num + 1}: No text found")
     return "\n".join(pages)
 
+def load_pdf_with_metadata(file_bytes) -> list:
+    reader = PdfReader(io.BytesIO(file_bytes))
+    docs = []
+
+    for page_num, page in enumerate(reader.pages):
+        text = page.extract_text()
+        if text:
+            docs.append(Document(
+                page_content=text,
+                metadata={"page": page_num + 1}  # 1-indexed for display
+            ))
+        else:
+            print(f"Page {page_num + 1}: No text found")
+
+    return docs
+
 def chunk_text(text: str) -> list:
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
@@ -76,6 +93,17 @@ def build_vector_store(chunks: list) -> FAISS:
         time.sleep(45)
     
     return vector_store
+
+def build_vector_store_from_docs(docs: list) -> object:
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=200,
+        separators=["\nLAW ", "\n\n", "\n", ".", " "]
+    )
+    chunks = splitter.split_documents(docs)  # split_documents preserves metadata
+    vector_store = build_vector_store(chunks)
+    return vector_store
+
 
 def save_vector_store(vector_store: FAISS, path: str = "./faiss_index") -> None:
     vector_store.save_local(path)

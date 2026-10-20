@@ -5,7 +5,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 import streamlit as st
 from dotenv import load_dotenv
-from rag import chunk_text, build_vector_store, rag_pipeline
+from rag import chunk_text, load_pdf_with_metadata, build_vector_store, build_vector_store_from_docs, rag_pipeline
 
 load_dotenv()
 
@@ -37,21 +37,11 @@ with st.sidebar:
         if uploaded_file.name != st.session_state.pdf_name:
             with st.spinner("Processing PDF... this may take a minute."):
                 try:
-                    # Read bytes directly — no saving to disk
-                    from pypdf import PdfReader
-                    import io
-
-                    reader = PdfReader(io.BytesIO(uploaded_file.read()))
-                    text = "\n".join(
-                        page.extract_text() for page in reader.pages
-                        if page.extract_text()
-                    )
-
-                    chunks = chunk_text(text)
-                    st.session_state.vector_store = build_vector_store(chunks)
+                    docs = load_pdf_with_metadata(uploaded_file.read())
+                    st.session_state.vector_store = build_vector_store_from_docs(docs)
                     st.session_state.pdf_name = uploaded_file.name
                     st.session_state.chat_history = []  # reset chat on new PDF
-                    st.success(f"✅ Ready! {len(chunks)} chunks indexed.")
+                    st.success(f"✅ Ready! {len(docs)} pages indexed.")
 
                 except Exception as e:
                     st.error(f"❌ Error processing PDF: {e}")
@@ -82,10 +72,23 @@ else:
                 try:
                     result = rag_pipeline(query, st.session_state.vector_store)
                     answer = result["answer"]
+                    source_docs = result["source_docs"]
+
                     st.markdown(answer)
                     st.session_state.chat_history.append({
                         "role": "assistant",
                         "content": answer
                     })
+
+                    with st.expander("📚 View Sources"):
+                        seen_pages = []
+                        for doc in source_docs:
+                            page = doc[0].metadata.get("page", "Unknown")
+                            if page not in seen_pages:  # deduplicate same page citations
+                                seen_pages.append(page)
+                                st.markdown(f"**Page {page}**")
+                                st.caption(doc[0].page_content[:300] + "...")
+                                st.divider()
+
                 except Exception as e:
                     st.error(f"❌ Error generating answer: {e}")
