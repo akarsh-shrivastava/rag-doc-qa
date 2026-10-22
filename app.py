@@ -5,7 +5,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 import streamlit as st
 from dotenv import load_dotenv
-from rag import chunk_text, load_pdf_with_metadata, build_vector_store, build_vector_store_from_docs, rag_pipeline
+from rag import chunk_text, load_pdf_with_metadata, build_vector_store, build_vector_store_from_docs, rag_pipeline, rag_pipeline_multi_pdfs
 
 load_dotenv()
 
@@ -30,23 +30,25 @@ if "pdf_name" not in st.session_state:
 # ── Sidebar — PDF upload ───────────────────────────────────────
 with st.sidebar:
     st.header("📂 Upload Document")
-    uploaded_file = st.file_uploader("Choose a PDF", type="pdf")
+    uploaded_files = st.file_uploader("Choose PDFs", type="pdf", accept_multiple_files=True)
 
-    if uploaded_file is not None:
-        # Only reprocess if a new PDF is uploaded
-        if uploaded_file.name != st.session_state.pdf_name:
-            with st.spinner("Processing PDF... this may take a minute."):
+    if uploaded_files:
+        uploaded_names = sorted([f.name for f in uploaded_files])
+        if uploaded_names != st.session_state.get("pdf_names", []):
+            with st.spinner("Processing PDFs... this may take a minute."):
                 try:
-                    docs = load_pdf_with_metadata(uploaded_file.read())
-                    st.session_state.vector_store = build_vector_store_from_docs(docs)
-                    st.session_state.pdf_name = uploaded_file.name
+                    pdf_files = [(f.read(), f.name) for f in uploaded_files]
+                    st.session_state.vector_store = rag_pipeline_multi_pdfs(pdf_files)
+                    st.session_state.pdf_names = uploaded_names
                     st.session_state.chat_history = []  # reset chat on new PDF
-                    st.success(f"✅ Ready! {len(docs)} pages indexed.")
+                    st.success(f"✅ Ready! {len(uploaded_files)} pages indexed.")
 
                 except Exception as e:
                     st.error(f"❌ Error processing PDF: {e}")
         else:
-            st.info(f"📄 Loaded: {st.session_state.pdf_name}")
+            st.info(f"📄 {len(uploaded_files)} document(s) loaded.")
+            for name in uploaded_names:
+                st.caption(f"• {name}")
 
 # ── Main area — Chat interface ─────────────────────────────────
 if st.session_state.vector_store is None:
@@ -84,9 +86,10 @@ else:
                         seen_pages = []
                         for doc in source_docs:
                             page = doc[0].metadata.get("page", "Unknown")
+                            source = doc[0].metadata.get("source", "Unknown document")
                             if page not in seen_pages:  # deduplicate same page citations
                                 seen_pages.append(page)
-                                st.markdown(f"**Page {page}**")
+                                st.markdown(f"**{source} - Page {page}**")
                                 st.caption(doc[0].page_content[:300] + "...")
                                 st.divider()
 

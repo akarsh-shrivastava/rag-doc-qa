@@ -45,7 +45,7 @@ def load_pdf(file_path: str) -> str:
             print(f"Page {page_num + 1}: No text found")
     return "\n".join(pages)
 
-def load_pdf_with_metadata(file_bytes) -> list:
+def load_pdf_with_metadata(file_bytes, filename: str) -> list:
     reader = PdfReader(io.BytesIO(file_bytes))
     docs = []
 
@@ -54,7 +54,10 @@ def load_pdf_with_metadata(file_bytes) -> list:
         if text:
             docs.append(Document(
                 page_content=text,
-                metadata={"page": page_num + 1}  # 1-indexed for display
+                metadata={
+                    "page": page_num + 1,
+                    "source": filename
+                }
             ))
         else:
             print(f"Page {page_num + 1}: No text found")
@@ -104,6 +107,28 @@ def build_vector_store_from_docs(docs: list) -> object:
     vector_store = build_vector_store(chunks)
     return vector_store
 
+def rag_pipeline_multi_pdfs(pdf_files: list) -> object:
+    vector_store = None
+
+    for file_bytes, filename in pdf_files:
+        print(f"Processing {filename}...")
+        docs = load_pdf_with_metadata(file_bytes, filename)
+
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200,
+            separators=["\nLAW ", "\n\n", "\n", ".", " "]
+        )
+        chunks = splitter.split_documents(docs)
+
+        if vector_store is None:
+            vector_store = build_vector_store(chunks)
+        else:
+            new_store = build_vector_store(chunks)
+            vector_store.merge_from(new_store)
+
+    return vector_store
+
 
 def save_vector_store(vector_store: FAISS, path: str = "./faiss_index") -> None:
     vector_store.save_local(path)
@@ -136,7 +161,7 @@ def generate_answer(query: str, context: str) -> str:
     return response.content
 
 def rag_pipeline(query: str, vector_store:FAISS) -> dict:
-    context, docs_with_scores = retrieve_chunks(query, vector_store)
+    context, docs_with_scores = retrieve_chunks(query, vector_store, 6)
     answer = generate_answer(query, context)
 
     return {
