@@ -63,6 +63,7 @@ else:
     query = st.chat_input("Ask a question about your document...")
 
     if query:
+        history_snapshot = list(st.session_state.chat_history)
         # Display user message
         with st.chat_message("user"):
             st.markdown(query)
@@ -72,7 +73,7 @@ else:
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
                 try:
-                    result = rag_pipeline(query, st.session_state.vector_store)
+                    result = rag_pipeline(query, st.session_state.vector_store, history_snapshot)
                     answer = result["answer"]
                     source_docs = result["source_docs"]
 

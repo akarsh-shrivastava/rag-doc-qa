@@ -32,6 +32,20 @@ Question:
 Answer:
 """
 
+CONDENSE_PROMPT = """Given the chat history and a follow-up question, rewrite the follow-up
+as a standalone question that can be understood without the history.
+- Keep any specific details from the history that the follow-up depends on.
+- If the follow-up is already standalone, return it unchanged.
+- Return ONLY the rewritten question. Do not answer it.
+
+Chat history:
+{history}
+
+Follow-up question: {question}
+
+Standalone question:
+"""
+
 
 def load_pdf(file_path: str) -> str:
     reader = PdfReader(file_path)
@@ -78,6 +92,23 @@ def chunk_text(text: str) -> list:
     )
     chunks = splitter.create_documents([text])
     return chunks
+
+def format_history(chat_history: list, max_messages: int = 6) -> str:
+    """Formats only the most recent messages to keep the prompt small."""
+    recent = chat_history[-max_messages:]
+    return "\n".join(f"{m['role'].capitalize()}: {m['content']}" for m in recent)
+
+def condense_question(query: str, chat_history: list) -> str:
+    """Rewrites a follow-up into a standalone question. Skips the API call on the first question."""
+    if not chat_history:
+        return query
+
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
+    prompt = CONDENSE_PROMPT.format(
+        history=format_history(chat_history),
+        question=query
+    )
+    return llm.invoke(prompt).content.strip()
 
 def build_vector_store(chunks: list) -> FAISS:
     embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
@@ -156,16 +187,18 @@ def generate_answer(query: str, context: str) -> str:
     llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.2)
     prompt = PromptTemplate(template=PROMPT_TEMPLATE, input_variables=["context", "question"])
     formatted_prompt = prompt.format(context=context, question=query)
-    
     response = llm.invoke(formatted_prompt)
     return response.content
 
-def rag_pipeline(query: str, vector_store:FAISS) -> dict:
-    context, docs_with_scores = retrieve_chunks(query, vector_store, 6)
+def rag_pipeline(query: str, vector_store:FAISS, chat_history: list = None) -> dict:
+    chat_history = chat_history or []
+    standalone = condense_question(query, chat_history)
+    context, docs_with_scores = retrieve_chunks(standalone, vector_store, 6)
     answer = generate_answer(query, context)
 
     return {
         "question": query,
+        "standalone_question": standalone,
         "answer": answer,
         "source_docs": docs_with_scores
     }
