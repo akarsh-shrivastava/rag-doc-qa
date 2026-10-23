@@ -9,6 +9,17 @@ from rag import chunk_text, load_pdf_with_metadata, build_vector_store, build_ve
 
 load_dotenv()
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SAMPLE_DIR = os.path.join(BASE_DIR, "sample_docs")
+MAX_UPLOAD_MB = 15
+
+SAMPLE_QUESTIONS = [
+    "What does Student membership cost per year?",
+    "I'm a student member. How much for 2 hours on the nets on a Saturday?",
+    "Can my 12-year-old use the nets alone?",
+]
+
+
 # ── Page config ───────────────────────────────────────────────
 st.set_page_config(
     page_title="RAG Document Q&A",
@@ -20,79 +31,151 @@ st.title("📄 Document Q&A Bot")
 st.caption("Upload a PDF and ask questions grounded in its content.")
 
 # ── Session state initialisation ──────────────────────────────
-if "vector_store" not in st.session_state:
-    st.session_state.vector_store = None
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-if "pdf_name" not in st.session_state:
-    st.session_state.pdf_name = None
+for key, default in {
+    "vector_store": None,
+    "chat_history": [],
+    "pdf_names": [],
+    "using_sample": False,
+}.items():
+    if key not in st.session_state:
+        st.session_state[key] = default
+
+def error_handler(e: Exception) -> str:
+    msg = str(e).lower()
+    if isinstance(e, ValueError):  # our own errors, e.g. scanned PDF
+        return f"📄 {e}"
+    if "resource_exhausted" in msg or "429" in msg or "quota" in msg:
+        return "⏳ The Gemini API rate limit was hit. Please wait a minute and try again."
+    if "api key" in msg or "api_key" in msg or "permission_denied" in msg:
+        return "🔑 There's a problem with the API key configuration."
+    return "⚠️ Something went wrong. Please try again."
+
+def build_sources(docs) -> list:
+    seen, out = set(), []
+    for d in docs:
+        key = (d[0].metadata.get("source"), d[0].metadata.get("page"))
+        if key not in seen:
+            seen.add(key)
+            out.append({
+                "source": d[0].metadata.get("source", "Unknown document"),
+                "page": d[0].metadata.get("page", "?"),
+                "snippet": d[0].page_content[:300],
+            })
+    return out
+
+def show_sources(sources):
+    if not sources:
+        return
+    with st.expander(f"📚 View Sources ({len(sources)})"):
+        for s in sources:
+            st.markdown(f"**{s['source']} — Page {s['page']}**")
+            st.caption(s["snippet"] + "...")
+            st.divider()
+
+def index_documents(pdf_files: list, names: list, is_sample: bool = False):
+    with st.spinner(f"Indexing {len(pdf_files)} document(s)... this can take a minute."):
+        try:
+            st.session_state.vector_store = rag_pipeline_multi_pdfs(pdf_files)
+            st.session_state.pdf_names = names
+            st.session_state.chat_history = []
+            st.session_state.using_sample = is_sample
+        except Exception as e:
+            print(f"[index error] {e!r}")  # full detail goes to the server log
+            st.error(error_handler(e))
+
+@st.cache_resource(show_spinner="Indexing sample documents (first visit only)...")
+def get_sample_store():
+    files = []
+    for name in sorted(os.listdir(SAMPLE_DIR)):
+        if name.lower().endswith(".pdf"):
+            with open(os.path.join(SAMPLE_DIR, name), "rb") as f:
+                files.append((f.read(), name))
+    return rag_pipeline_multi_pdfs(files), [n for _, n in files]
 
 # ── Sidebar — PDF upload ───────────────────────────────────────
 with st.sidebar:
-    st.header("📂 Upload Document")
-    uploaded_files = st.file_uploader("Choose PDFs", type="pdf", accept_multiple_files=True)
+    st.header("📂 Documents")
+    uploaded_files = st.file_uploader(
+        "Choose one or more PDFs", type="pdf", accept_multiple_files=True
+    )
 
     if uploaded_files:
-        uploaded_names = sorted([f.name for f in uploaded_files])
-        if uploaded_names != st.session_state.get("pdf_names", []):
-            with st.spinner("Processing PDFs... this may take a minute."):
-                try:
-                    pdf_files = [(f.read(), f.name) for f in uploaded_files]
-                    st.session_state.vector_store = rag_pipeline_multi_pdfs(pdf_files)
-                    st.session_state.pdf_names = uploaded_names
-                    st.session_state.chat_history = []  # reset chat on new PDF
-                    st.success(f"✅ Ready! {len(uploaded_files)} pages indexed.")
-
-                except Exception as e:
-                    st.error(f"❌ Error processing PDF: {e}")
+        total_mb = sum(f.size for f in uploaded_files) / (1024 * 1024)
+        if total_mb > MAX_UPLOAD_MB:
+            st.error(f"Total upload is {total_mb:.1f} MB. Limit is {MAX_UPLOAD_MB} MB.")
         else:
-            st.info(f"📄 {len(uploaded_files)} document(s) loaded.")
-            for name in uploaded_names:
-                st.caption(f"• {name}")
+            names = sorted(f.name for f in uploaded_files)
+            if names != st.session_state.pdf_names:
+                index_documents([(f.getvalue(), f.name) for f in uploaded_files], names)
+    else:
+        st.caption("No PDF handy?")
+        if st.button("✨ Try with sample documents"):
+            try:
+                store, names = get_sample_store()
+                st.session_state.vector_store = store
+                st.session_state.pdf_names = names
+                st.session_state.chat_history = []
+                st.session_state.using_sample = True
+            except Exception as e:
+                print(f"[sample error] {e!r}")
+                st.error(error_handler(e))
+
+    if st.session_state.vector_store is not None:
+        st.divider()
+        st.subheader("Loaded")
+        for n in st.session_state.pdf_names:
+            st.caption(f"📄 {n}")
+        st.caption(f"{st.session_state.vector_store.index.ntotal} chunks indexed")
+        if st.button("🗑️ Clear chat"):
+            st.session_state.chat_history = []
+            st.rerun()
+
 
 # ── Main area — Chat interface ─────────────────────────────────
+
 if st.session_state.vector_store is None:
-    st.info("👈 Upload a PDF from the sidebar to get started.")
-else:
-    # Display chat history
-    for message in st.session_state.chat_history:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+    st.info("👈 Upload one or more PDFs, or try the sample documents, to get started.")
+    st.stop()
 
-    # Chat input
-    query = st.chat_input("Ask a question about your document...")
+for m in st.session_state.chat_history:
+    with st.chat_message(m["role"]):
+        st.markdown(m["content"])
+        show_sources(m.get("sources"))
 
-    if query:
-        history_snapshot = list(st.session_state.chat_history)
-        # Display user message
-        with st.chat_message("user"):
-            st.markdown(query)
-        st.session_state.chat_history.append({"role": "user", "content": query})
+pending = None
+if st.session_state.using_sample and not st.session_state.chat_history:
+    st.caption("Try one of these:")
+    for q in SAMPLE_QUESTIONS:
+        if st.button(q, key=f"example_{q}"):
+            pending = q
 
-        # Generate and display answer
-        with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                try:
-                    result = rag_pipeline(query, st.session_state.vector_store, history_snapshot)
-                    answer = result["answer"]
-                    source_docs = result["source_docs"]
+query = st.chat_input("Ask a question about your documents...") or pending
 
-                    st.markdown(answer)
-                    st.session_state.chat_history.append({
-                        "role": "assistant",
-                        "content": answer
-                    })
+if query:
+    history_snapshot = list(st.session_state.chat_history)  # before appending the new question
 
-                    with st.expander("📚 View Sources"):
-                        seen_pages = []
-                        for doc in source_docs:
-                            page = doc[0].metadata.get("page", "Unknown")
-                            source = doc[0].metadata.get("source", "Unknown document")
-                            if page not in seen_pages:  # deduplicate same page citations
-                                seen_pages.append(page)
-                                st.markdown(f"**{source} - Page {page}**")
-                                st.caption(doc[0].page_content[:300] + "...")
-                                st.divider()
+    with st.chat_message("user"):
+        st.markdown(query)
+    st.session_state.chat_history.append({"role": "user", "content": query})
 
-                except Exception as e:
-                    st.error(f"❌ Error generating answer: {e}")
+    with st.chat_message("assistant"):
+        try:
+            with st.spinner("Searching the documents..."):
+                result = rag_pipeline(query, st.session_state.vector_store, chat_history=history_snapshot)
+        except Exception as e:
+            print(f"[answer error] {e!r}")
+            st.error(error_handler(e))
+            st.session_state.chat_history.pop()  # drop the unanswered question
+        else:
+            answer = result["answer"]
+            # Don't show sources under a refusal: they'd imply the answer came from them
+            sources = [] if answer.startswith("I cannot find") else build_sources(result["source_docs"])
+
+            st.markdown(answer)
+            if result["standalone_question"] != query:
+                st.caption(f"🔎 Searched as: {result['standalone_question']}")
+            show_sources(sources)
+
+            st.session_state.chat_history.append(
+                {"role": "assistant", "content": answer, "sources": sources}
+            )

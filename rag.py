@@ -76,6 +76,9 @@ def load_pdf_with_metadata(file_bytes, filename: str) -> list:
         else:
             print(f"Page {page_num + 1}: No text found")
 
+    if not docs:
+        raise ValueError(f"'{filename}' has no extractable text. It may be a scanned (image-based) PDF.")
+
     return docs
 
 def chunk_text(text: str) -> list:
