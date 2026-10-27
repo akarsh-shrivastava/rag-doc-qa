@@ -16,6 +16,9 @@ from langchain_community.vectorstores import FAISS
 
 load_dotenv()
 
+IS_DEV = os.getenv("APP_ENV") == "dev"
+REBUILD_INDEX = False
+DEV_INDEX_PATH = "./faiss_index_dev"
 
 PROMPT_TEMPLATE = """
 You are an expert assistant answering questions about cricket laws.
@@ -140,6 +143,15 @@ def build_vector_store_from_docs(docs: list) -> object:
     chunks = splitter.split_documents(docs)  # split_documents preserves metadata
     vector_store = build_vector_store(chunks)
     return vector_store
+
+def get_sample_vector_store(pdf_files: list):
+    if IS_DEV and not REBUILD_INDEX and os.path.exists(DEV_INDEX_PATH):
+        return load_vector_store(DEV_INDEX_PATH)
+
+    store = rag_pipeline_multi_pdfs(pdf_files)
+    if IS_DEV:
+        store.save_local(DEV_INDEX_PATH)
+    return store
 
 def rag_pipeline_multi_pdfs(pdf_files: list) -> object:
     vector_store = None

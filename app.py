@@ -1,11 +1,12 @@
 # app.py
 import os
+import io
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 import streamlit as st
 from dotenv import load_dotenv
-from rag import chunk_text, load_pdf_with_metadata, build_vector_store, build_vector_store_from_docs, rag_pipeline, rag_pipeline_multi_pdfs
+from rag import get_sample_vector_store, rag_pipeline, rag_pipeline_multi_pdfs
 
 load_dotenv()
 
@@ -36,6 +37,7 @@ for key, default in {
     "chat_history": [],
     "pdf_names": [],
     "using_sample": False,
+    "pdf_bytes": {}
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -76,9 +78,11 @@ def index_documents(pdf_files: list, names: list, is_sample: bool = False):
     with st.spinner(f"Indexing {len(pdf_files)} document(s)... this can take a minute."):
         try:
             st.session_state.vector_store = rag_pipeline_multi_pdfs(pdf_files)
+            st.session_state.pdf_bytes = {name: data for data, name in pdf_files}  # NEW
             st.session_state.pdf_names = names
             st.session_state.chat_history = []
             st.session_state.using_sample = is_sample
+
         except Exception as e:
             print(f"[index error] {e!r}")  # full detail goes to the server log
             st.error(error_handler(e))
@@ -90,7 +94,27 @@ def get_sample_store():
         if name.lower().endswith(".pdf"):
             with open(os.path.join(SAMPLE_DIR, name), "rb") as f:
                 files.append((f.read(), name))
-    return rag_pipeline_multi_pdfs(files), [n for _, n in files]
+    return get_sample_vector_store(files), files
+
+def render_document_viewer():
+    names = st.session_state.pdf_names
+    open_by_default = not st.session_state.chat_history
+
+    with st.expander("📖 View documents", expanded=open_by_default):
+        labels = [n.replace(".pdf", "").replace("_", " ").title() for n in names]
+        for tab, name in zip(st.tabs(labels), names):
+            with tab:
+                data = st.session_state.pdf_bytes.get(name)
+                if data is None:
+                    st.caption("Preview not available.")
+                    continue
+                try:
+                    st.pdf(io.BytesIO(data), height=450)
+                except Exception:
+                    st.download_button(
+                        "⬇️ Download PDF", data, file_name=name,
+                        mime="application/pdf", key=f"dl_{name}"
+                    )
 
 # ── Sidebar — PDF upload ───────────────────────────────────────
 with st.sidebar:
@@ -111,9 +135,10 @@ with st.sidebar:
         st.caption("No PDF handy?")
         if st.button("✨ Try with sample documents"):
             try:
-                store, names = get_sample_store()
+                store, files = get_sample_store()
                 st.session_state.vector_store = store
-                st.session_state.pdf_names = names
+                st.session_state.pdf_names = [n for _, n in files]
+                st.session_state.pdf_bytes = {n: b for b, n in files}
                 st.session_state.chat_history = []
                 st.session_state.using_sample = True
             except Exception as e:
@@ -136,6 +161,8 @@ with st.sidebar:
 if st.session_state.vector_store is None:
     st.info("👈 Upload one or more PDFs, or try the sample documents, to get started.")
     st.stop()
+
+render_document_viewer()
 
 for m in st.session_state.chat_history:
     with st.chat_message(m["role"]):

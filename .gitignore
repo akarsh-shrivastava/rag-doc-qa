@@ -4,4 +4,5 @@ __pycache__/
 *.pyc
 .DS_Store
 faiss_index
+faiss_index_dev
 docs/
